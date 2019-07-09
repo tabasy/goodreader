@@ -18,10 +18,10 @@ class RatesSpider(scrapy.Spider):
 	BOOK_BASE_URL = BASE_URL + '/book/show/%d._'
 	REVIEW_BASE_URL = BASE_URL + '/book/reviews/%d?language_code=fa&page=%d&rate=%dsort=date_added'
 	RATING_BASE_URL = BASE_URL + '/book/reviews/%d?page=%d&rate=%dsort=date_added'
-	USER_REVIEW_BASE_URL = 'https://www.goodreads.com/review/list/%d?page=%d&sort=date_read&view=reviews'
+	USER_REVIEW_BASE_URL = 'https://www.goodreads.com/review/list/%d?page=%d&order=d&sort=title&view=reviews'
 
 	rating_cols = ['book_id', 'user_id', 'rate', 'date']
-	review_cols = rating_cols + ['review']
+	review_cols = rating_cols #+ ['review']
 	book_cols = ['book_id', 'title', 'cover_url', 'rate_avg', 'rate_no', 'author_name', 'author_id']
 				# , 'author_name_2', 'author_id_2']
 	
@@ -29,44 +29,56 @@ class RatesSpider(scrapy.Spider):
 		
 		super().__init__(**kwargs)
 		
+		self.SEED = int(getattr(self, 'seed', '637699'))
 		self.MIN_RATE_PER_BOOK = int(getattr(self, 'min_rate_per_book', '5'))
 		self.REVIEW_ONLY = getattr(self, 'review_only', 'false') == 'true'
 		self.MAX_USER = int(getattr(self, 'max_user', '1000'))
 		self.MAX_BOOK = int(getattr(self, 'max_book', '100'))
-		self.MAX_REVIEW_PAGES = int(getattr(self, 'max-page', '2'))
+		self.MAX_REVIEW_PAGES = int(getattr(self, 'max_page', '2'))
 		self.BOOKS_OUT = getattr(self, 'books_out', 'books.csv')
 		self.RATES_OUT = getattr(self, 'rates_out', 'rates.csv')
 		
+		self.CONTINUE = getattr(self, 'continue', 'false') == 'true'
+		
 		self.VALID_LANGS = ['Persian']
 		
-		self.user_ids = set()
-		self.author2id, self.id2author = {}, {}
-		self.book2id, self.id2book = {}, {}
-		self.book2author = {}
-		
-		if self.REVIEW_ONLY:
-			rates_header = pd.DataFrame(columns=RatesSpider.review_cols)
+		if self.CONTINUE:
+			
+			with open(self.BOOKS_OUT, 'r', encoding='utf8') as f:
+				books_df = pd.read_csv(f, sep='\t', error_bad_lines=False)
+				self.book_ids = set(books_df['book_id'].values)
+				
+			with open(self.RATES_OUT, 'r', encoding='utf8') as f:
+				rates_df = pd.read_csv(f, sep='\t', error_bad_lines=False)
+				self.user_ids = set(rates_df['user_id'].values)
 		else:
-			rates_header = pd.DataFrame(columns=RatesSpider.rating_cols)
+			self.user_ids = set()
+			self.book_ids = set()
+			
+			if self.REVIEW_ONLY:
+				rates_header = pd.DataFrame(columns=RatesSpider.review_cols)
+			else:
+				rates_header = pd.DataFrame(columns=RatesSpider.rating_cols)
+			
+			with open(self.RATES_OUT, 'w', encoding='utf8') as f:
+				rates_header.to_csv(f, sep='\t', line_terminator='\n', header=True, index=False)
+			
+			books_header = pd.DataFrame(columns=RatesSpider.book_cols)
+			with open(self.BOOKS_OUT, 'w', encoding='utf8') as f:
+				books_header.to_csv(f, sep='\t', line_terminator='\n', header=True, index=False)
 		
-		with open(self.RATES_OUT, 'w', encoding='utf8') as f:
-			rates_header.to_csv(f, sep='\t', line_terminator='\n', header=True, index=False)
-		
-		books_header = pd.DataFrame(columns=RatesSpider.book_cols)
-		with open(self.BOOKS_OUT, 'w', encoding='utf8') as f:
-			books_header.to_csv(f, sep='\t', line_terminator='\n', header=True, index=False)
+		self.ignored = {'invalid_lang': 0, 'duplicate_book': 0, 'obscure': 0, 'max_book': 0,
+		                'duplicate_user': 0, 'max_user': 0}
 		
 	def start_requests(self):
 		
-		urls = [self.BOOK_BASE_URL % 637699, ]
-		
-		for url in urls:
-			yield scrapy.Request(url=url, callback=self.parse_book_page)
+		url = self.BOOK_BASE_URL % self.SEED
+		yield scrapy.Request(url=url, callback=self.parse_book_page, meta={'book_id': self.SEED})
 	
 	def parse_book_page(self, response):
 		
 		# get book info
-		book_id = response.css('link[rel="canonical"]::attr(href)').re('[0-9]+')[0]
+		book_id = response.meta.get('book_id')
 		title = response.css('#bookTitle::text').get().strip()
 		language = response.css('div[itemprop="inLanguage"]::text').get()
 		
@@ -81,17 +93,15 @@ class RatesSpider(scrapy.Spider):
 		
 		if not self.validate_book(int(book_id), language, int(ratings_no)):
 			return
-			
-		self.book2id[title] = int(book_id)
-		self.id2book[int(book_id)] = title
+		
+		self.book_ids.add(int(book_id))
 		
 		df = pd.DataFrame(columns=RatesSpider.book_cols)
 		df.loc[0] = [book_id, title, cover_url, rate_avg, ratings_no, author_names[0], author_ids[0]]
 		
 		with open(self.BOOKS_OUT, 'a', encoding='utf8') as f:
 			df.to_csv(f, sep='\t', line_terminator='\n', header=False, index=False)
-			
-		# new_users = self.get_reviews_extract_users(int(book_id))
+		
 		for rate, page in product(range(5), range(1)):
 			if self.REVIEW_ONLY:
 				yield scrapy.Request(self.REVIEW_BASE_URL % (int(book_id), page+1, rate+1),
@@ -99,26 +109,7 @@ class RatesSpider(scrapy.Spider):
 			else:
 				yield scrapy.Request(self.RATING_BASE_URL % (int(book_id), page+1, rate+1),
 				                     callback=self.parse_reviews, meta={'book_id': int(book_id)})
-	
-	def get_reviews_extract_users(self, book_id):
 		
-		futures = []
-		
-		for rate, page in product(range(5), range(1)):
-			if self.REVIEW_ONLY:
-				future = self.session.get(self.REVIEW_BASE_URL % (book_id, page + 1, rate + 1))
-			else:
-				future = self.session.get(self.RATING_BASE_URL % (book_id, page + 1, rate + 1))
-			futures.append(future)
-		
-		all_new_users = []
-		
-		for resp in futures:
-			new_users = self.parse_reviews(book_id, resp)
-			all_new_users += new_users
-	
-		return all_new_users
-	
 	def parse_reviews(self, response, *args, **kwargs):
 		
 		book_id = response.meta.get('book_id')
@@ -148,8 +139,7 @@ class RatesSpider(scrapy.Spider):
 			date = item.css('a.reviewDate::text').get()
 			review = item.css('div.reviewText > span > span').getall()
 			
-			if self.validate_user(int(user_id)):
-				new_users.append(int(user_id))
+			new_users.append(int(user_id))
 			
 			if len(review) > 1:
 				review = review[-1]
@@ -159,7 +149,7 @@ class RatesSpider(scrapy.Spider):
 				review = ''
 			
 			if self.REVIEW_ONLY:
-				df.loc[len(df)] = [int(book_id), int(user_id), int(rate), date, review]
+				df.loc[len(df)] = [int(book_id), int(user_id), int(rate), date] # + [review]
 			else:
 				df.loc[len(df)] = [int(book_id), int(user_id), int(rate), date]
 		
@@ -168,20 +158,48 @@ class RatesSpider(scrapy.Spider):
 		
 		for u in new_users:
 			if self.validate_user(u):
-				yield scrapy.Request(url=self.USER_REVIEW_BASE_URL % (u, 1), callback=self.parse_user_page)
 				self.user_ids.add(u)
+				for page in range(3):
+					yield scrapy.Request(url=self.USER_REVIEW_BASE_URL % (u, page + 1), callback=self.parse_user_page)
 			
 	def parse_user_page(self, response):
 		
 		book_ids = response.css('td.title a::attr(href)').re('[0-9]+')
 		
 		for b in book_ids:
-			if self.validate_book(int(b)):
-				yield scrapy.Request(self.BOOK_BASE_URL % int(b), callback=self.parse_book_page)
+			if int(b) not in self.book_ids:
+				yield scrapy.Request(self.BOOK_BASE_URL % int(b), callback=self.parse_book_page, meta={'book_id': int(b)})
 
 	def validate_book(self, book_id, language='Persian', ratings_no=1000):
-		return language in self.VALID_LANGS and book_id not in self.id2book and \
-		       ratings_no > self.MIN_RATE_PER_BOOK and len(self.id2book) < self.MAX_BOOK
+		
+		if language not in self.VALID_LANGS:
+			self.ignored['invalid_lang'] += 1
+			print(f'-- ignored bcz of invalid_lang, total {self.ignored["invalid_lang"]} ignored bcz of this!')
+			return False
+		if book_id in self.book_ids:
+			self.ignored['duplicate_book'] += 1
+			print(f'-- ignored bcz of duplicate_book, total {self.ignored["duplicate_book"]} ignored bcz of this!')
+			return False
+		if ratings_no < self.MIN_RATE_PER_BOOK:
+			self.ignored['obscure'] += 1
+			print(f'-- ignored bcz of obscure, total {self.ignored["obscure"]} ignored bcz of this!')
+			return False
+		if len(self.book_ids) >= self.MAX_BOOK:
+			self.ignored['max_book'] += 1
+			print(f'-- ignored bcz of max_book, total {self.ignored["max_book"]} ignored bcz of this!')
+			return False
+		print(f'>> adding {len(self.book_ids)+1}-th book!')
+		return True
 	
 	def validate_user(self, user_id):
-		return user_id not in self.user_ids and len(self.user_ids) < self.MAX_USER
+		
+		if user_id in self.user_ids:
+			self.ignored['duplicate_user'] += 1
+			print(f'-- ignored bcz of duplicate_user, total {self.ignored["duplicate_user"]} ignored bcz of this!')
+			return False
+		if len(self.user_ids) >= self.MAX_USER:
+			self.ignored['max_user'] += 1
+			print(f'-- ignored bcz of max_user, total {self.ignored["max_user"]} ignored bcz of this!')
+			return False
+		print(f'>> adding {len(self.user_ids)+1}-th user!')
+		return True
