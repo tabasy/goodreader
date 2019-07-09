@@ -1,6 +1,7 @@
 # Goodreader
 
 Goodreads scraper with scrapy and requests-future and without selenium :)
+
 Scraped data is meant to be specialized for a book recommendation system, but may be helpful for other applications.
 
 # What is the output?
