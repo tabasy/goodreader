@@ -4,6 +4,7 @@ Goodreads scraper with scrapy and requests-future and without selenium :)
 
 Scraped data is meant to be specialized for a book recommendation system, but may be helpful for other applications.
 
+
 ## What is the output?
 
 The crawler starts from a book page, gets book info and rates/reviews. Users who rated this book, have rated many other books and so on...
@@ -22,6 +23,7 @@ book_id | user_id | rate | date
 637699 |	614778 |	5 |	Jun 02, 2008
 637699 |	21030932 |	3 |	Nov 10, 2015
 637699 |	55469702 |	4 |	May 26, 2018
+
 
 ## How to use?
 
