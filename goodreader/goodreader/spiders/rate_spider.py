@@ -29,10 +29,13 @@ class RatesSpider(scrapy.Spider):
 		
 		super().__init__(**kwargs)
 		
-		self.MIN_RATE_PER_BOOK = 5
-		self.REVIEW_ONLY = False
-		self.MAX_USER = 100
-		self.MAX_BOOK = 100
+		self.MIN_RATE_PER_BOOK = int(getattr(self, 'min_rate_per_book', '5'))
+		self.REVIEW_ONLY = getattr(self, 'review_only', 'false') == 'true'
+		self.MAX_USER = int(getattr(self, 'max_user', '1000'))
+		self.MAX_BOOK = int(getattr(self, 'max_book', '100'))
+		self.MAX_REVIEW_PAGES = int(getattr(self, 'max-page', '2'))
+		self.BOOKS_OUT = getattr(self, 'books_out', 'books.csv')
+		self.RATES_OUT = getattr(self, 'rates_out', 'rates.csv')
 		
 		self.VALID_LANGS = ['Persian']
 		
@@ -46,15 +49,13 @@ class RatesSpider(scrapy.Spider):
 		else:
 			rates_header = pd.DataFrame(columns=RatesSpider.rating_cols)
 		
-		with open('rates.csv', 'w', encoding='utf8') as f:
+		with open(self.RATES_OUT, 'w', encoding='utf8') as f:
 			rates_header.to_csv(f, sep='\t', line_terminator='\n', header=True, index=False)
 		
 		books_header = pd.DataFrame(columns=RatesSpider.book_cols)
-		with open('books.csv', 'w', encoding='utf8') as f:
+		with open(self.BOOKS_OUT, 'w', encoding='utf8') as f:
 			books_header.to_csv(f, sep='\t', line_terminator='\n', header=True, index=False)
 		
-		self.session = FuturesSession()
-
 	def start_requests(self):
 		
 		urls = [self.BOOK_BASE_URL % 637699, ]
@@ -87,15 +88,17 @@ class RatesSpider(scrapy.Spider):
 		df = pd.DataFrame(columns=RatesSpider.book_cols)
 		df.loc[0] = [book_id, title, cover_url, rate_avg, ratings_no, author_names[0], author_ids[0]]
 		
-		with open('books.csv', 'a', encoding='utf8') as f:
+		with open(self.BOOKS_OUT, 'a', encoding='utf8') as f:
 			df.to_csv(f, sep='\t', line_terminator='\n', header=False, index=False)
 			
-		new_users = self.get_reviews_extract_users(int(book_id))
-		
-		for u in new_users:
-			if self.validate_user(u):
-				yield scrapy.Request(url=self.USER_REVIEW_BASE_URL % (u, 1), callback=self.parse_user_page)
-				self.user_ids.add(u)
+		# new_users = self.get_reviews_extract_users(int(book_id))
+		for rate, page in product(range(5), range(1)):
+			if self.REVIEW_ONLY:
+				yield scrapy.Request(self.REVIEW_BASE_URL % (int(book_id), page+1, rate+1),
+				                     callback=self.parse_reviews, meta={'book_id': int(book_id)})
+			else:
+				yield scrapy.Request(self.RATING_BASE_URL % (int(book_id), page+1, rate+1),
+				                     callback=self.parse_reviews, meta={'book_id': int(book_id)})
 	
 	def get_reviews_extract_users(self, book_id):
 		
@@ -116,13 +119,14 @@ class RatesSpider(scrapy.Spider):
 	
 		return all_new_users
 	
-	def parse_reviews(self, book_id, future, *args, **kwargs):
+	def parse_reviews(self, response, *args, **kwargs):
 		
-		r = future.result().content.decode('utf8')
+		book_id = response.meta.get('book_id')
+		raw_str = response.text
 		
-		start = r.find(', ') + 3
-		end = r.rfind('"')
-		valid_html = r[start:end]\
+		start = raw_str.find(', ') + 3
+		end = raw_str.rfind('"')
+		valid_html = raw_str[start:end]\
 			.replace('\\"', '"').replace('\\"', '"').replace('\\"', '"')\
 			.replace('\\n', '')\
 			.replace('\\u003c', '<')\
@@ -159,11 +163,14 @@ class RatesSpider(scrapy.Spider):
 			else:
 				df.loc[len(df)] = [int(book_id), int(user_id), int(rate), date]
 		
-		with open('rates.csv', 'a', encoding='utf8') as f:
+		with open(self.RATES_OUT, 'a', encoding='utf8') as f:
 			df.to_csv(f, sep='\t', line_terminator='\n', header=False, index=False)
-			
-		return new_users
 		
+		for u in new_users:
+			if self.validate_user(u):
+				yield scrapy.Request(url=self.USER_REVIEW_BASE_URL % (u, 1), callback=self.parse_user_page)
+				self.user_ids.add(u)
+			
 	def parse_user_page(self, response):
 		
 		book_ids = response.css('td.title a::attr(href)').re('[0-9]+')
@@ -171,7 +178,7 @@ class RatesSpider(scrapy.Spider):
 		for b in book_ids:
 			if self.validate_book(int(b)):
 				yield scrapy.Request(self.BOOK_BASE_URL % int(b), callback=self.parse_book_page)
-		
+
 	def validate_book(self, book_id, language='Persian', ratings_no=1000):
 		return language in self.VALID_LANGS and book_id not in self.id2book and \
 		       ratings_no > self.MIN_RATE_PER_BOOK and len(self.id2book) < self.MAX_BOOK
